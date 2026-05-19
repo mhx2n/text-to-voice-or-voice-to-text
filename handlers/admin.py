@@ -48,6 +48,16 @@ class BroadcastState(StatesGroup):
     confirm     = State()
 
 
+class ChannelState(StatesGroup):
+    waiting_channel_id  = State()
+    waiting_channel_url = State()
+    waiting_channel_title = State()
+    waiting_join_msg    = State()
+    waiting_btn_row     = State()
+    waiting_btn_text    = State()
+    waiting_btn_url     = State()
+
+
 # ─── Guards ───────────────────────────────────────────────────────────────────
 
 def is_owner(user_id: int) -> bool:
@@ -544,13 +554,324 @@ async def cb_toggle_maintenance(cb: CallbackQuery) -> None:
     if not await owner_only(cb):
         return
     currently_maintenance = await db.get_setting("maintenance", "0") == "1"
-    # Toggle: if maintenance was on → turn off (go online); if off → turn on (go offline)
     new_maintenance = not currently_maintenance
     await db.set_setting("maintenance", "1" if new_maintenance else "0")
     bot_online = not new_maintenance
-    await cb.message.edit_reply_markup(reply_markup=kb.settings_kb(bot_online))
     status = "Online" if bot_online else "Offline"
+    # Update both text and keyboard so the state is clearly reflected
+    await cb.message.edit_text(
+        "<b>Bot Settings</b>\n\n"
+        "Toggle the bot on or off for all users. "
+        "When offline, only the owner can continue using the bot.\n\n"
+        f"<b>System is now: {status}</b>",
+        reply_markup=kb.settings_kb(bot_online),
+    )
     await cb.answer(f"System is now {status}.")
+
+
+# ─── Channel Management ───────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "op:channels")
+async def cb_channels_menu(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await owner_only(cb):
+        return
+    await state.clear()
+    channels = await db.get_required_channels()
+    count    = len(channels)
+    text = (
+        "<b>Required Channels</b>\n\n"
+        f"▸ {count} channel(s) configured.\n\n"
+        "Users must join all listed channels before using the bot.\n"
+        "If no channels are added, join check is disabled."
+    )
+    await cb.message.edit_text(text, reply_markup=kb.channels_menu_kb(channels))
+    await cb.answer()
+
+
+# ── Add Channel (3-step: channel_id → url → title) ───────────────────────────
+
+@router.callback_query(F.data == "ch:add")
+async def cb_channel_add_start(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await owner_only(cb):
+        return
+    await state.set_state(ChannelState.waiting_channel_id)
+    await cb.message.edit_text(
+        "<b>Add Required Channel — Step 1/3</b>\n\n"
+        "Send the channel username or ID.\n\n"
+        "<b>Examples:</b>\n"
+        "▸ <code>@mychannel</code>  (public channel username)\n"
+        "▸ <code>-1001234567890</code>  (private channel numeric ID)\n\n"
+        "<i>Bot must be an admin in the channel to verify membership.</i>",
+        reply_markup=kb.cancel_kb("op:channels"),
+    )
+    await cb.answer()
+
+
+@router.message(ChannelState.waiting_channel_id)
+async def receive_channel_id(msg: Message, state: FSMContext) -> None:
+    if not is_owner(msg.from_user.id):
+        return
+    value = msg.text.strip() if msg.text else ""
+    if not value:
+        await msg.answer("Empty input. Please send a valid channel username or ID.")
+        return
+    await state.update_data(new_channel_id=value)
+    await state.set_state(ChannelState.waiting_channel_url)
+    await msg.answer(
+        "<b>Add Required Channel — Step 2/3</b>\n\n"
+        "Send the invite/join URL for this channel.\n\n"
+        "<b>Examples:</b>\n"
+        "▸ <code>https://t.me/mychannel</code>\n"
+        "▸ <code>https://t.me/+invite_link</code>",
+        reply_markup=kb.cancel_kb("op:channels"),
+    )
+
+
+@router.message(ChannelState.waiting_channel_url)
+async def receive_channel_url(msg: Message, state: FSMContext) -> None:
+    if not is_owner(msg.from_user.id):
+        return
+    url = msg.text.strip() if msg.text else ""
+    if not url.startswith("http"):
+        await msg.answer("Please send a valid URL starting with https://")
+        return
+    await state.update_data(new_channel_url=url)
+    await state.set_state(ChannelState.waiting_channel_title)
+    await msg.answer(
+        "<b>Add Required Channel — Step 3/3</b>\n\n"
+        "Send a display title for this channel (shown on the join button).\n\n"
+        "Example: <code>My Awesome Channel</code>",
+        reply_markup=kb.cancel_kb("op:channels"),
+    )
+
+
+@router.message(ChannelState.waiting_channel_title)
+async def receive_channel_title(msg: Message, state: FSMContext) -> None:
+    if not is_owner(msg.from_user.id):
+        return
+    title   = msg.text.strip() if msg.text else ""
+    data    = await state.get_data()
+    ch_id   = data.get("new_channel_id", "")
+    ch_url  = data.get("new_channel_url", "")
+    await state.clear()
+
+    ok = await db.add_required_channel(ch_id, ch_url, title)
+    channels = await db.get_required_channels()
+    if ok:
+        await msg.answer(
+            f"<b>Channel Added</b>\n\n"
+            f"▸ ID / Username:  <code>{html.escape(ch_id)}</code>\n"
+            f"▸ Title:  {html.escape(title)}\n"
+            f"▸ URL:  {html.escape(ch_url)}\n\n"
+            f"Total channels: {len(channels)}",
+            reply_markup=kb.channels_menu_kb(channels),
+        )
+        await db.write_log("INFO", f"Owner added required channel {ch_id}")
+    else:
+        await msg.answer(
+            "This channel is already in the list.",
+            reply_markup=kb.channels_menu_kb(channels),
+        )
+
+
+# ── Channel info / delete ─────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("ch:info:"))
+async def cb_channel_info(cb: CallbackQuery) -> None:
+    if not await owner_only(cb):
+        return
+    ch_db_id  = int(cb.data.split(":")[2])
+    channels  = await db.get_required_channels()
+    ch        = next((c for c in channels if c["id"] == ch_db_id), None)
+    if not ch:
+        await cb.answer("Channel not found.", show_alert=True)
+        return
+    await cb.answer(
+        f"ID: {ch['channel_id']}\nTitle: {ch['title'] or 'N/A'}\nAdded: {ch['added_at']}",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data.startswith("ch:del:"))
+async def cb_channel_del_confirm(cb: CallbackQuery) -> None:
+    if not await owner_only(cb):
+        return
+    ch_db_id = int(cb.data.split(":")[2])
+    await cb.message.edit_text(
+        "<b>Confirm Removal</b>\n\nRemove this channel from the required list?",
+        reply_markup=kb.channel_del_confirm_kb(ch_db_id),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ch:delok:"))
+async def cb_channel_del_ok(cb: CallbackQuery) -> None:
+    if not await owner_only(cb):
+        return
+    ch_db_id = int(cb.data.split(":")[2])
+    await db.remove_required_channel(ch_db_id)
+    channels = await db.get_required_channels()
+    await cb.message.edit_text(
+        f"<b>Channel Removed</b>\n\n{len(channels)} channel(s) remaining.",
+        reply_markup=kb.channels_menu_kb(channels),
+    )
+    await cb.answer("Removed.")
+
+
+# ── Edit Join Message ─────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "ch:editmsg")
+async def cb_edit_join_msg_start(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await owner_only(cb):
+        return
+    current = await db.get_join_message_text()
+    await state.set_state(ChannelState.waiting_join_msg)
+    await cb.message.edit_text(
+        "<b>Edit Join Message</b>\n\n"
+        "Send the new message text that users will see when they need to join channels.\n\n"
+        f"<b>Current message:</b>\n{html.escape(current)}",
+        reply_markup=kb.cancel_kb("op:channels"),
+    )
+    await cb.answer()
+
+
+@router.message(ChannelState.waiting_join_msg)
+async def receive_join_msg(msg: Message, state: FSMContext) -> None:
+    if not is_owner(msg.from_user.id):
+        return
+    text = msg.text.strip() if msg.text else ""
+    if not text:
+        await msg.answer("Empty input. Please send the new message text.")
+        return
+    await state.clear()
+    await db.set_join_message_text(text)
+    channels = await db.get_required_channels()
+    await msg.answer(
+        "<b>Join Message Updated</b>\n\n"
+        f"{html.escape(text)}",
+        reply_markup=kb.channels_menu_kb(channels),
+    )
+
+
+# ── Edit Join Buttons (extra URL buttons on the join message) ─────────────────
+
+@router.callback_query(F.data == "ch:editbtns")
+async def cb_edit_btns(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await owner_only(cb):
+        return
+    await state.clear()
+    buttons = await db.get_join_buttons()
+    await cb.message.edit_text(
+        "<b>Join Message Buttons</b>\n\n"
+        "These are extra URL buttons displayed on the join message (below the channel buttons).\n"
+        "Buttons with the same row number appear side-by-side in the same row.\n\n"
+        f"{len(buttons)} button(s) configured.",
+        reply_markup=kb.edit_btns_kb(buttons),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "ch:addbtn")
+async def cb_add_btn_start(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await owner_only(cb):
+        return
+    await state.set_state(ChannelState.waiting_btn_row)
+    await cb.message.edit_text(
+        "<b>Add Button — Step 1/3</b>\n\n"
+        "Send the <b>row number</b> for this button.\n"
+        "Buttons with the same row number appear side-by-side.\n\n"
+        "Example: send <code>0</code> for the first row, <code>1</code> for the second, etc.",
+        reply_markup=kb.cancel_kb("ch:editbtns"),
+    )
+    await cb.answer()
+
+
+@router.message(ChannelState.waiting_btn_row)
+async def receive_btn_row(msg: Message, state: FSMContext) -> None:
+    if not is_owner(msg.from_user.id):
+        return
+    text = msg.text.strip() if msg.text else ""
+    try:
+        row_num = int(text)
+    except ValueError:
+        await msg.answer("Please send a valid number (e.g. 0, 1, 2).")
+        return
+    await state.update_data(new_btn_row=row_num)
+    await state.set_state(ChannelState.waiting_btn_text)
+    await msg.answer(
+        "<b>Add Button — Step 2/3</b>\n\n"
+        "Send the <b>button label text</b> shown to users.\n\n"
+        "Example: <code>Our Website</code>",
+        reply_markup=kb.cancel_kb("ch:editbtns"),
+    )
+
+
+@router.message(ChannelState.waiting_btn_text)
+async def receive_btn_text(msg: Message, state: FSMContext) -> None:
+    if not is_owner(msg.from_user.id):
+        return
+    text = msg.text.strip() if msg.text else ""
+    if not text:
+        await msg.answer("Empty input. Please send the button text.")
+        return
+    await state.update_data(new_btn_text=text)
+    await state.set_state(ChannelState.waiting_btn_url)
+    await msg.answer(
+        "<b>Add Button — Step 3/3</b>\n\n"
+        "Send the <b>URL</b> this button will open.\n\n"
+        "Example: <code>https://t.me/yourchannel</code>",
+        reply_markup=kb.cancel_kb("ch:editbtns"),
+    )
+
+
+@router.message(ChannelState.waiting_btn_url)
+async def receive_btn_url(msg: Message, state: FSMContext) -> None:
+    if not is_owner(msg.from_user.id):
+        return
+    url = msg.text.strip() if msg.text else ""
+    if not url.startswith("http"):
+        await msg.answer("Please send a valid URL starting with https://")
+        return
+    data     = await state.get_data()
+    row_num  = data.get("new_btn_row", 0)
+    btn_text = data.get("new_btn_text", "")
+    await state.clear()
+    await db.add_join_button(row_num, btn_text, url)
+    buttons = await db.get_join_buttons()
+    await msg.answer(
+        f"<b>Button Added</b>\n\n"
+        f"▸ Row: {row_num}\n"
+        f"▸ Text: {html.escape(btn_text)}\n"
+        f"▸ URL: {html.escape(url)}\n\n"
+        f"Total buttons: {len(buttons)}",
+        reply_markup=kb.edit_btns_kb(buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("ch:delbtn:"))
+async def cb_del_btn(cb: CallbackQuery) -> None:
+    if not await owner_only(cb):
+        return
+    btn_id = int(cb.data.split(":")[2])
+    await db.remove_join_button(btn_id)
+    buttons = await db.get_join_buttons()
+    await cb.message.edit_text(
+        f"<b>Button Removed</b>\n\n{len(buttons)} button(s) remaining.",
+        reply_markup=kb.edit_btns_kb(buttons),
+    )
+    await cb.answer("Removed.")
+
+
+@router.callback_query(F.data == "ch:clearbtn")
+async def cb_clear_btns(cb: CallbackQuery) -> None:
+    if not await owner_only(cb):
+        return
+    await db.clear_join_buttons()
+    await cb.message.edit_text(
+        "<b>All Buttons Cleared</b>\n\n0 button(s) remaining.",
+        reply_markup=kb.edit_btns_kb([]),
+    )
+    await cb.answer("Cleared.")
 
 
 # ─── Noop (pagination label buttons) ──────────────────────────────────────────

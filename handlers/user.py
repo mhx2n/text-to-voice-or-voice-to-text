@@ -13,6 +13,7 @@ import uuid as _uuid
 from io import BytesIO
 
 from aiogram import F, Router
+from aiogram.enums import ContentType
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -75,16 +76,101 @@ async def get_active_key() -> tuple[str | None, dict | None]:
     return await eleven.get_working_key(_session, active_keys)
 
 
+# ─── Safe Edit Helper ─────────────────────────────────────────────────────────
+
+async def _safe_edit(cb: CallbackQuery, text: str, markup=None) -> None:
+    """
+    Safely edit or replace a message regardless of content type.
+    Audio / voice / photo messages cannot be edited with edit_text(),
+    so we delete and resend in those cases.
+    """
+    msg = cb.message
+    media_types = (
+        ContentType.AUDIO, ContentType.VOICE, ContentType.VIDEO,
+        ContentType.PHOTO, ContentType.DOCUMENT, ContentType.STICKER,
+        ContentType.ANIMATION, ContentType.VIDEO_NOTE,
+    )
+    try:
+        if msg.content_type in media_types:
+            # Delete the media message and send a fresh text message
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            await msg.answer(text, reply_markup=markup)
+        else:
+            await msg.edit_text(text, reply_markup=markup)
+    except Exception:
+        # Last resort: just send a new message
+        try:
+            await msg.answer(text, reply_markup=markup)
+        except Exception:
+            pass
+
+
+# ─── Channel Join Check ───────────────────────────────────────────────────────
+
+async def check_channels_joined(bot, user_id: int) -> tuple[bool, list[dict], list[dict]]:
+    """
+    Returns (all_joined, not_joined_channels, extra_buttons).
+    If no required channels are configured, returns (True, [], []).
+    """
+    channels = await db.get_required_channels()
+    if not channels:
+        return True, [], []
+    not_joined = []
+    for ch in channels:
+        try:
+            member = await bot.get_chat_member(ch["channel_id"], user_id)
+            if member.status in ("left", "kicked", "banned"):
+                not_joined.append(ch)
+        except Exception:
+            # If bot can't check (e.g. not admin in channel), treat as not joined
+            not_joined.append(ch)
+    buttons = await db.get_join_buttons()
+    return len(not_joined) == 0, not_joined, buttons
+
+
+async def _send_join_prompt(msg_or_cb, bot, user_id: int) -> None:
+    """Send the join channels prompt to a user."""
+    _, not_joined, extra_buttons = await check_channels_joined(bot, user_id)
+    join_text = await db.get_join_message_text()
+    markup    = kb.join_channels_kb(not_joined if not_joined else await db.get_required_channels(), extra_buttons)
+
+    if isinstance(msg_or_cb, CallbackQuery):
+        await _safe_edit(msg_or_cb, join_text, markup)
+        await msg_or_cb.answer()
+    else:
+        await msg_or_cb.answer(join_text, reply_markup=markup)
+
+
 # ─── /start ───────────────────────────────────────────────────────────────────
 
 @router.message(CommandStart())
-async def cmd_start(msg: Message) -> None:
+async def cmd_start(msg: Message, bot) -> None:
     if msg.chat.type != "private" and not is_owner(msg.from_user.id):
         return
-    await db.upsert_user(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)
-    if await check_banned(msg.from_user.id):
-        await msg.answer("Access Denied\n\nYour account has been restricted from using this service.")
+
+    uid = msg.from_user.id
+    await db.upsert_user(uid, msg.from_user.username, msg.from_user.full_name)
+
+    if await check_banned(uid):
+        await msg.answer(
+            "Access Denied\n\nYour account has been restricted from using this service."
+        )
         return
+
+    # ── Channel join check (skip for owners) ──
+    if not is_owner(uid):
+        all_joined, not_joined, extra_buttons = await check_channels_joined(bot, uid)
+        if not all_joined:
+            join_text = await db.get_join_message_text()
+            await msg.answer(
+                join_text,
+                reply_markup=kb.join_channels_kb(not_joined, extra_buttons),
+            )
+            return
+
     name = html.escape(msg.from_user.first_name or "")
     await msg.answer(
         f"Welcome, <b>{name}</b>.\n\n"
@@ -95,6 +181,93 @@ async def cmd_start(msg: Message) -> None:
         "Select an option below to get started:",
         reply_markup=kb.user_main_kb(),
     )
+
+
+# ─── Join Confirm Callback ────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "join:confirm")
+async def cb_join_confirm(cb: CallbackQuery, bot) -> None:
+    uid = cb.from_user.id
+
+    if is_owner(uid):
+        # Owner always passes
+        name = html.escape(cb.from_user.first_name or "")
+        await _safe_edit(
+            cb,
+            f"Welcome, <b>{name}</b>.\n\n"
+            "<b>Voice Studio</b> is ready. Select an option below:",
+            kb.user_main_kb(),
+        )
+        await cb.answer()
+        return
+
+    all_joined, not_joined, extra_buttons = await check_channels_joined(bot, uid)
+    if all_joined:
+        name = html.escape(cb.from_user.first_name or "")
+        await _safe_edit(
+            cb,
+            f"Welcome, <b>{name}</b>.\n\n"
+            "<b>Voice Studio</b> is ready. Select an option below:",
+            kb.user_main_kb(),
+        )
+        await cb.answer("✅ Access granted!")
+    else:
+        join_text = await db.get_join_message_text()
+        await _safe_edit(
+            cb,
+            join_text + "\n\n<i>You have not joined all required channels yet.</i>",
+            kb.join_channels_kb(not_joined, extra_buttons),
+        )
+        await cb.answer("⚠️ Please join all channels first!", show_alert=True)
+
+
+# ─── Shared channel/ban/maintenance guard ─────────────────────────────────────
+
+async def _user_guard(cb_or_msg, bot, uid: int, check_ch: bool = True) -> bool:
+    """
+    Returns True if the user may proceed.
+    Sends appropriate error message and returns False otherwise.
+    is_message=True means cb_or_msg is a Message; otherwise CallbackQuery.
+    """
+    is_msg = isinstance(cb_or_msg, Message)
+
+    if await check_banned(uid):
+        txt = "Access Denied\n\nYour account has been restricted from using this service."
+        if is_msg:
+            await cb_or_msg.answer(txt)
+        else:
+            await cb_or_msg.answer(txt, show_alert=True)
+        return False
+
+    if await check_maintenance() and not is_owner(uid):
+        txt = (
+            "<b>Service Temporarily Unavailable</b>\n\n"
+            "The system is currently under maintenance. Please try again shortly."
+        )
+        if is_msg:
+            await cb_or_msg.answer(txt)
+        else:
+            await _safe_edit(cb_or_msg, txt, kb.back_to_menu())
+            await cb_or_msg.answer("System is under maintenance.", show_alert=True)
+        return False
+
+    if check_ch and not is_owner(uid):
+        all_joined, not_joined, extra_buttons = await check_channels_joined(bot, uid)
+        if not all_joined:
+            join_text = await db.get_join_message_text()
+            if is_msg:
+                await cb_or_msg.answer(
+                    join_text, reply_markup=kb.join_channels_kb(not_joined, extra_buttons)
+                )
+            else:
+                await _safe_edit(
+                    cb_or_msg, join_text,
+                    kb.join_channels_kb(not_joined, extra_buttons)
+                )
+                await cb_or_msg.answer("Join required channels first!", show_alert=True)
+            return False
+
+    return True
 
 
 @router.message(Command("help"))
@@ -123,40 +296,44 @@ async def cmd_help(msg: Message) -> None:
 
 @router.callback_query(F.data == "up:main")
 async def cb_user_main(cb: CallbackQuery) -> None:
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb,
         "<b>Voice Studio</b>\n\nSelect an option:",
-        reply_markup=kb.user_main_kb(),
+        kb.user_main_kb(),
     )
     await cb.answer()
 
 
 @router.callback_query(F.data == "up:tts")
 async def cb_user_tts_info(cb: CallbackQuery) -> None:
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb,
         "<b>Text to Voice</b>\n\n"
         "Type or paste any text in the chat and the bot will convert it to speech automatically.\n\n"
         "▸ Supports all languages\n"
         "▸ Powered by ElevenLabs Multilingual v2",
-        reply_markup=kb.back_to_menu(),
+        kb.back_to_menu(),
     )
     await cb.answer()
 
 
 @router.callback_query(F.data == "up:stt")
 async def cb_user_stt_info(cb: CallbackQuery) -> None:
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb,
         "<b>Voice to Text</b>\n\n"
         "Send any voice message and the bot will transcribe it into text.\n\n"
         "▸ Supports multiple languages\n"
-        "▸ Powered by ElevenLabs Scribe v1",
-        reply_markup=kb.back_to_menu(),
+        "▸ Powered by ElevenLabs",
+        kb.back_to_menu(),
     )
     await cb.answer()
 
 
 @router.callback_query(F.data == "up:help")
 async def cb_user_help(cb: CallbackQuery) -> None:
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb,
         "<b>How to Use</b>\n\n"
         "<b>▸ Text to Voice</b>\n"
         "Send any text in the chat.\n\n"
@@ -166,7 +343,7 @@ async def cb_user_help(cb: CallbackQuery) -> None:
         "Choose from Anime, Girl, Women, Men, Elder, or Child voices.\n\n"
         "<b>▸ Statistics</b>\n"
         "View your total conversions.",
-        reply_markup=kb.back_to_menu(),
+        kb.back_to_menu(),
     )
     await cb.answer()
 
@@ -185,7 +362,7 @@ async def cb_user_stats(cb: CallbackQuery) -> None:
         f"▸ Active voice:  <b>{user['voice_name']}</b> ({user['voice_cat']})\n"
         f"▸ Member since:  {user['joined_at'][:10]}"
     )
-    await cb.message.edit_text(text, reply_markup=kb.back_to_menu())
+    await _safe_edit(cb, text, kb.back_to_menu())
     await cb.answer()
 
 
@@ -205,18 +382,20 @@ async def cmd_voice(msg: Message) -> None:
 
 @router.callback_query(F.data == "up:voice")
 async def cb_voice_menu(cb: CallbackQuery) -> None:
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb,
         "<b>Voice Selection</b>\n\nChoose a voice category:",
-        reply_markup=kb.voice_categories_kb(),
+        kb.voice_categories_kb(),
     )
     await cb.answer()
 
 
 @router.callback_query(F.data == "vc:cats")
 async def cb_voice_cats(cb: CallbackQuery) -> None:
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb,
         "<b>Voice Categories</b>\n\nChoose a category:",
-        reply_markup=kb.voice_categories_kb(),
+        kb.voice_categories_kb(),
     )
     await cb.answer()
 
@@ -228,11 +407,12 @@ async def cb_voice_category(cb: CallbackQuery) -> None:
     if not cat:
         await cb.answer("Unknown category.", show_alert=True)
         return
-    uid            = cb.from_user.id
-    voice_id, _, _ = await db.get_user_voice(uid)
-    await cb.message.edit_text(
+    uid             = cb.from_user.id
+    voice_id, _, _  = await db.get_user_voice(uid)
+    await _safe_edit(
+        cb,
         f"{cat['label']}  —  <b>Available Voices</b>\n\nSelect a voice to activate it:",
-        reply_markup=kb.voice_list_kb(cat_key, voice_id),
+        kb.voice_list_kb(cat_key, voice_id),
     )
     await cb.answer()
 
@@ -249,13 +429,14 @@ async def cb_voice_set(cb: CallbackQuery) -> None:
     v = cat["voices"][vi]
     await db.upsert_user(cb.from_user.id, cb.from_user.username, cb.from_user.full_name)
     await db.set_user_voice(cb.from_user.id, v["id"], cat_key, v["name"])
-    await cb.message.edit_text(
+    await _safe_edit(
+        cb,
         "<b>Voice Updated</b>\n\n"
         f"▸ Category:  {cat['label']}\n"
         f"▸ Voice:  <b>{v['name']}</b>\n"
         f"▸ Style:  {v['desc']}\n\n"
         "Send any text to try your new voice.",
-        reply_markup=kb.back_to_menu(),
+        kb.back_to_menu(),
     )
     await cb.answer(f"Voice set to {v['name']}")
 
@@ -263,7 +444,12 @@ async def cb_voice_set(cb: CallbackQuery) -> None:
 # ─── Re-generate last TTS ──────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "up:regen")
-async def cb_regen(cb: CallbackQuery, state: FSMContext) -> None:
+async def cb_regen(cb: CallbackQuery, state: FSMContext, bot) -> None:
+    uid = cb.from_user.id
+
+    if not await _user_guard(cb, bot, uid):
+        return
+
     data      = await state.get_data()
     last_text = data.get("last_tts_text", "")
     if not last_text:
@@ -271,22 +457,23 @@ async def cb_regen(cb: CallbackQuery, state: FSMContext) -> None:
         return
 
     await cb.answer("Regenerating audio…")
-    uid          = cb.from_user.id
     voice_id, _, vname = await db.get_user_voice(uid)
-    api_key, _   = await get_active_key()
+    api_key, _         = await get_active_key()
     if not api_key:
-        await cb.message.edit_text(
+        await _safe_edit(
+            cb,
             "Service Unavailable\n\nNo active API key found. Please contact the bot administrator.",
-            reply_markup=kb.back_to_menu(),
+            kb.back_to_menu(),
         )
         return
 
     ok, audio, err = await eleven.tts(_session, api_key, voice_id, last_text, DEFAULT_MODEL_ID)
     if not ok:
         logger.error("TTS regen error uid=%s: %s", uid, err)
-        await cb.message.edit_text(
+        await _safe_edit(
+            cb,
             f"<b>Conversion Failed</b>\n\n<code>{html.escape(err[:300])}</code>",
-            reply_markup=kb.back_to_menu(),
+            kb.back_to_menu(),
         )
         return
 
@@ -302,13 +489,13 @@ async def cb_regen(cb: CallbackQuery, state: FSMContext) -> None:
 # ─── STT → TTS ────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "up:stt2tts")
-async def cb_stt2tts(cb: CallbackQuery) -> None:
-    """Extract transcribed text from the STT result message and convert to voice."""
-    text = cb.message.text or cb.message.caption or ""
+async def cb_stt2tts(cb: CallbackQuery, bot) -> None:
+    uid = cb.from_user.id
+    if not await _user_guard(cb, bot, uid):
+        return
 
-    # Robust extraction: look for the transcript block after the header line
+    text = cb.message.text or cb.message.caption or ""
     transcript = ""
-    # Handle both possible formats of the transcript message
     for separator in ("\n\n", "\n"):
         if "Transcript" in text and separator in text:
             parts = text.split(separator, 1)
@@ -323,22 +510,23 @@ async def cb_stt2tts(cb: CallbackQuery) -> None:
         return
 
     await cb.answer("Converting to voice…")
-    uid          = cb.from_user.id
     voice_id, _, vname = await db.get_user_voice(uid)
-    api_key, _   = await get_active_key()
+    api_key, _         = await get_active_key()
     if not api_key:
-        await cb.message.edit_text(
+        await _safe_edit(
+            cb,
             "Service Unavailable\n\nNo active API key found.",
-            reply_markup=kb.back_to_menu(),
+            kb.back_to_menu(),
         )
         return
 
     ok, audio, err = await eleven.tts(_session, api_key, voice_id, transcript, DEFAULT_MODEL_ID)
     if not ok:
         logger.error("TTS stt2tts error uid=%s: %s", uid, err)
-        await cb.message.edit_text(
+        await _safe_edit(
+            cb,
             f"<b>Conversion Failed</b>\n\n<code>{html.escape(err[:200])}</code>",
-            reply_markup=kb.back_to_menu(),
+            kb.back_to_menu(),
         )
         return
 
@@ -354,7 +542,7 @@ async def cb_stt2tts(cb: CallbackQuery) -> None:
 # ─── Text → Voice (main message handler) ──────────────────────────────────────
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def handle_text(msg: Message, state: FSMContext) -> None:
+async def handle_text(msg: Message, state: FSMContext, bot) -> None:
     uid  = msg.from_user.id
     text = msg.text.strip() if msg.text else ""
 
@@ -367,15 +555,7 @@ async def handle_text(msg: Message, state: FSMContext) -> None:
     if msg.chat.type != "private" and not is_owner(uid):
         return
 
-    if await check_maintenance() and not is_owner(uid):
-        await msg.answer(
-            "<b>Service Temporarily Unavailable</b>\n\n"
-            "The system is currently under maintenance. Please try again shortly."
-        )
-        return
-
-    if await check_banned(uid):
-        await msg.answer("Access Denied\n\nYour account has been restricted from using this service.")
+    if not await _user_guard(msg, bot, uid):
         return
 
     if not text:
@@ -404,7 +584,6 @@ async def handle_text(msg: Message, state: FSMContext) -> None:
 
     await db.increment_user_stat(uid, "tts_count")
     await db.mark_key_used(api_key, len(text))
-    # Store for regeneration
     await state.update_data(last_tts_text=text)
     try:
         await proc.delete()
@@ -420,21 +599,13 @@ async def handle_text(msg: Message, state: FSMContext) -> None:
 # ─── Voice → Text (main voice handler) ────────────────────────────────────────
 
 @router.message(F.voice | F.audio)
-async def handle_voice(msg: Message) -> None:
+async def handle_voice(msg: Message, bot) -> None:
     uid = msg.from_user.id
 
     if msg.chat.type != "private" and not is_owner(uid):
         return
 
-    if await check_maintenance() and not is_owner(uid):
-        await msg.answer(
-            "<b>Service Temporarily Unavailable</b>\n\n"
-            "The system is currently under maintenance. Please try again shortly."
-        )
-        return
-
-    if await check_banned(uid):
-        await msg.answer("Access Denied\n\nYour account has been restricted from using this service.")
+    if not await _user_guard(msg, bot, uid):
         return
 
     await db.upsert_user(uid, msg.from_user.username, msg.from_user.full_name)
@@ -481,15 +652,10 @@ async def handle_voice(msg: Message) -> None:
 
 @router.inline_query()
 async def handle_inline_query(query: InlineQuery) -> None:
-    """
-    Allows the owner to type @botname <text> in any chat to convert text to voice.
-    Non-owners receive a prompt to open the bot privately instead.
-    """
     uid  = query.from_user.id
     text = query.query.strip()
 
     if not is_owner(uid):
-        # Non-owners: show a redirect prompt, do not process
         await query.answer(
             results=[
                 InlineQueryResultArticle(
@@ -507,7 +673,6 @@ async def handle_inline_query(query: InlineQuery) -> None:
         return
 
     if not text:
-        # Show usage hint
         await query.answer(
             results=[
                 InlineQueryResultArticle(
@@ -525,15 +690,12 @@ async def handle_inline_query(query: InlineQuery) -> None:
         )
         return
 
-    # --- Inline TTS ---
-
     # Prune expired cache entries
     now = time.time()
     expired_keys = [k for k, (_, ts) in _inline_cache.items() if now - ts > _INLINE_CACHE_TTL]
     for k in expired_keys:
         del _inline_cache[k]
 
-    # Return cached result if available
     cache_key = text[:200]
     if cache_key in _inline_cache:
         file_id, _ = _inline_cache[cache_key]
@@ -544,7 +706,6 @@ async def handle_inline_query(query: InlineQuery) -> None:
         )
         return
 
-    # Generate TTS
     if await check_maintenance():
         await query.answer(results=[], cache_time=5, is_personal=True)
         return
@@ -562,8 +723,6 @@ async def handle_inline_query(query: InlineQuery) -> None:
         await query.answer(results=[], cache_time=5, is_personal=True)
         return
 
-    # Upload to owner's private chat to obtain a Telegram file_id,
-    # then delete the message immediately.
     try:
         sent = await query.bot.send_audio(
             chat_id=uid,
@@ -595,10 +754,6 @@ async def handle_inline_query(query: InlineQuery) -> None:
 # ─── Dot-command dispatcher ────────────────────────────────────────────────────
 
 async def _handle_dot_command(msg: Message, text: str) -> None:
-    """
-    .t — Owner replies to a voice/audio message to transcribe it (any chat)
-    .a — Owner replies to a text message to convert it to voice (any chat)
-    """
     uid = msg.from_user.id
     cmd = text.lstrip(".").strip().lower()
 
@@ -658,6 +813,5 @@ async def _handle_dot_command(msg: Message, text: str) -> None:
             )
         return
 
-    # Silently ignore unknown dot-commands in non-private chats
     if msg.chat.type == "private":
         pass  # let other handlers / FSM catch it
