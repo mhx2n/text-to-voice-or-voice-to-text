@@ -77,7 +77,17 @@ async def tts(
         "Content-Type": "application/json",
         "Accept": "audio/mpeg",
     }
-    payload = {"text": text, "model_id": model_id}
+    payload = {
+        "text": text,
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": 0.75,          # বেশি stability = স্থির ও স্পষ্ট উচ্চারণ
+            "similarity_boost": 0.85,   # voice চরিত্র বজায় রাখে
+            "style": 0.0,               # কম style = বেশি natural ও clear
+            "use_speaker_boost": True,  # উচ্চারণ আরো স্পষ্ট করে
+            "speed": 0.8                # ← এটাই মূল fix! (1.0 = normal, 0.7 = সবচেয়ে আস্তে)
+        },
+    }
     try:
         async with session.post(url, headers=headers, json=payload, timeout=TIMEOUT) as resp:
             body = await resp.read()
