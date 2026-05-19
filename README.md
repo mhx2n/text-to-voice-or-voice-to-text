@@ -1,117 +1,85 @@
-# 🤖 Advanced TTS / STT Telegram Bot
+# Voice Studio — Telegram Bot
 
-ElevenLabs-powered voice bot with a full owner panel, multi-key management, user management, broadcasting, and 6 voice categories — all via inline buttons.
-
----
-
-## ✨ Features
-
-| Feature | Detail |
-|---|---|
-| 🔊 Text → Voice | Any text in any language → ElevenLabs MP3 |
-| 🎤 Voice → Text | Any voice/audio message → transcript |
-| 🎭 6 Voice Categories | Anime · Girl · Women · Men · Old · Child |
-| 🔑 Multi-API Keys | Add / remove / toggle / view quota per key |
-| 📢 Broadcast | Forward any message type to all users |
-| 📋 Live Logs | Last N minutes · all levels or errors only · refresh |
-| 👥 User Manager | Paginated list · ban / unban · per-user stats |
-| 📊 Stats | CPU · RAM · uptime · key quota summary |
-| ⚙️ Maintenance Mode | Disable bot for users without affecting owner |
-| 🔘 Inline UI | Everything works via inline buttons — no typing |
-| . prefix | All commands work with both `/` and `.` |
-| Group support | Owner can use `.t` / `.a` in any group |
+ElevenLabs-powered Text-to-Speech and Speech-to-Text bot built with aiogram v3, deployable on Render.
 
 ---
 
-## 🚀 Deploy to Render
+## What Was Fixed (v2)
 
-### 1. Push to GitHub
-```bash
-git init
-git add .
-git commit -m "initial"
-git remote add origin https://github.com/YOUR_NAME/YOUR_REPO.git
-git push -u origin main
+### Critical Bug Fix
+- **Broken voice ID removed**: `nu9bn7ambTzvv3MFShMm` (the "Amy" voice in the Girl category) is a private cloned
+  voice that returns `HTTP 404: voice_not_found`. It has been replaced with `21m00Tcm4TlvDq8ikWAM` (Rachel),
+  a verified ElevenLabs pre-made public voice. This eliminates the recurring TTS failure.
+
+### New Feature: Inline Mode (Owner-Only)
+- The bot now supports Telegram inline queries.
+- Only the owner can use it. In any group or chat, type `@yourbotname some text` and select the result to
+  send a voice audio file instantly.
+- Results are cached in memory for 10 minutes to avoid redundant API calls.
+- To enable inline mode in BotFather: `/setinline` → set placeholder text (e.g. "Type text to convert…").
+
+### New Feature: Bot On / Off Toggle
+- Under **Owner Panel → Bot Settings**, the owner can now clearly toggle the system online or offline.
+- When offline, all regular users receive a maintenance notice. The owner retains full access.
+
+### Landing Page
+- Visiting the bot's Render URL now displays a professional HTML status page instead of plain "OK".
+
+### UI / UX Overhaul
+- All messages rewritten in professional English — no informal phrasing.
+- All emoji replaced with Unicode symbols (◆ ▸ ● ○ ◈ ✓ ✗ ⊕ ⊗ ⟳ ◀ ▶) for a premium aesthetic.
+- Regenerate button now actually regenerates the last TTS text (stored in FSM state).
+- STT → TTS conversion uses a more robust text extraction parser.
+
+---
+
+## Setup
+
+### Environment Variables
+
+```
+BOT_TOKEN        = your Telegram bot token
+OWNER_IDS        = comma-separated Telegram user IDs (e.g. 123456,789012)
+DEFAULT_VOICE_ID = 21m00Tcm4TlvDq8ikWAM   (Rachel — reliable default)
+DEFAULT_MODEL_ID = eleven_multilingual_v2
+PORT             = 10000
+DATABASE_FILE    = bot.db
+BROADCAST_DELAY  = 0.05
 ```
 
-### 2. Create Render Web Service
-1. Go to [render.com](https://render.com) → **New → Web Service**
-2. Connect your GitHub repo
-3. Render detects `render.yaml` automatically
+### Enable Inline Mode in BotFather
 
-### 3. Set Environment Variables
-In Render dashboard → **Environment**:
+1. Open BotFather and send `/setinline`
+2. Choose your bot
+3. Set placeholder: `Type text to convert to voice…`
 
-| Key | Value |
-|---|---|
-| `BOT_TOKEN` | Your bot token from [@BotFather](https://t.me/BotFather) |
-| `OWNER_IDS` | Your Telegram numeric ID(s), comma-separated |
+### Deploy on Render
 
-All other variables have sensible defaults.
-
-### 4. Add ElevenLabs Keys
-Start the bot, open it in Telegram, then:
-- Send `/owner` or `.owner`
-- Click **🔑 API Keys → ➕ Add Key**
-- Send your ElevenLabs API key (starts with `sk_`)
+Push to GitHub and connect the repo to Render. The `render.yaml` is pre-configured.
 
 ---
 
-## 📱 Usage
+## Owner Commands
 
-### Users (private chat only)
-| Action | How |
-|---|---|
-| Text → Voice | Just send any text |
-| Voice → Text | Send a voice message |
-| Change voice | `/voice` or 🎭 button |
-| My stats | 📊 button in menu |
-
-### Owner (anywhere)
-| Command | Action |
-|---|---|
-| `/owner` or `.owner` | Open owner panel |
-| Reply to voice + `.t` | Transcribe |
-| Reply to text + `.a` | Convert to voice |
-| `/userbio USER_ID` | View user profile |
+| Command | Where | Description |
+|---------|-------|-------------|
+| `/owner` or `.owner` | Any chat | Open owner panel |
+| `/panel` or `.panel` | Any chat | Open owner panel |
+| `.t` (reply to voice) | Any chat | Transcribe the replied voice message |
+| `.a` (reply to text)  | Any chat | Convert the replied text to voice |
+| `@botname text`       | Any chat | Inline TTS (owner-only) |
 
 ---
 
-## 🎭 Voice Categories
+## Voice Categories
+
+All voices use verified ElevenLabs pre-made public voice IDs.
 
 | Category | Voices |
-|---|---|
-| 🎌 Anime | Akemi · Yuki · Hana · Sakura |
-| 👧 Girl | Elli · Lily · Amy · Freya |
-| 👩 Women | Rachel · Bella · Dorothy · Domi · Grace · Serena |
-| 👨 Men | Josh · Arnold · Adam · Sam · Callum · Liam |
-| 👴 Old | Clyde · Dave · Joseph · Fin |
-| 🧒 Child | Charlie · Matilda · Elli Jr |
-
-All voices use `eleven_multilingual_v2` — they work in **any language**.
-
----
-
-## 📁 File Structure
-```
-.
-├── main.py          ← Entry point
-├── config.py        ← Config + voice library
-├── db.py            ← SQLite async database
-├── api.py           ← ElevenLabs API wrapper
-├── keyboards.py     ← All inline keyboards
-├── handlers/
-│   ├── admin.py     ← Owner panel handlers
-│   └── user.py      ← User handlers + TTS/STT
-├── requirements.txt
-├── render.yaml
-└── .env.example
-```
-
----
-
-## 🔑 Getting ElevenLabs API Keys
-1. Go to [elevenlabs.io](https://elevenlabs.io) → Sign up free
-2. Profile → API Keys → Create
-3. Free plan gives 10,000 chars/month
-4. Add multiple keys to extend quota (key rotation is automatic)
+|----------|--------|
+| Anime    | Akemi, Yuki, Hana, Sakura |
+| Girl     | Elli, Lily, Rachel, Freya |
+| Women    | Bella, Dorothy, Domi, Grace, Serena |
+| Men      | Josh, Arnold, Adam, Sam, Callum, Liam |
+| Elder    | Clyde, Dave, Fin |
+| Child    | Charlie, Matilda, Mia |

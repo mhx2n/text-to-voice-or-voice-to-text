@@ -3,40 +3,41 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-_raw_owners = os.getenv("OWNER_IDS", os.getenv("OWNER_ID", "0"))
+BOT_TOKEN        = os.getenv("BOT_TOKEN", "").strip()
+_raw_owners      = os.getenv("OWNER_IDS", os.getenv("OWNER_ID", "0"))
 OWNER_IDS: set[int] = {int(x.strip()) for x in _raw_owners.split(",") if x.strip().isdigit()}
-DEFAULT_VOICE_ID = os.getenv("DEFAULT_VOICE_ID", "EXAVITQu4vr4xnSDxMaL").strip()
+DEFAULT_VOICE_ID = os.getenv("DEFAULT_VOICE_ID", "21m00Tcm4TlvDq8ikWAM").strip()
 DEFAULT_MODEL_ID = os.getenv("DEFAULT_MODEL_ID", "eleven_multilingual_v2").strip()
-PORT = int(os.getenv("PORT", "10000"))
-DATABASE_FILE = os.getenv("DATABASE_FILE", "bot.db")
-BROADCAST_DELAY = float(os.getenv("BROADCAST_DELAY", "0.05"))  # seconds between sends
+PORT             = int(os.getenv("PORT", "10000"))
+DATABASE_FILE    = os.getenv("DATABASE_FILE", "bot.db")
+BROADCAST_DELAY  = float(os.getenv("BROADCAST_DELAY", "0.05"))
 
-# ─── Voice Library ───────────────────────────────────────────────────────────
-# ElevenLabs pre-made voice IDs (public library – always accessible)
-VOICE_LIBRARY: dict[str, list[dict]] = {
+# ─── Voice Library ────────────────────────────────────────────────────────────
+# All voice IDs are verified ElevenLabs pre-made public voices.
+# Cloned / non-public voice IDs have been replaced.
+VOICE_LIBRARY: dict[str, dict] = {
     "anime": {
-        "label": "🎌 Anime",
+        "label": "◈ Anime",
         "voices": [
-            {"name": "Akemi",   "id": "EXAVITQu4vr4xnSDxMaL", "desc": "Soft Anime Female"},
-            {"name": "Yuki",    "id": "MF3mGyEYCl7XYWbV9V6O", "desc": "Young Anime Girl"},
-            {"name": "Hana",    "id": "oWAxZDx7w5VEj9dCyTzz", "desc": "Clear Anime Voice"},
-            {"name": "Sakura",  "id": "XrExE9yKIg1WjnnlVkGX", "desc": "Expressive Anime"},
+            {"name": "Akemi",  "id": "EXAVITQu4vr4xnSDxMaL", "desc": "Soft Anime Female"},
+            {"name": "Yuki",   "id": "MF3mGyEYCl7XYWbV9V6O", "desc": "Young Anime Girl"},
+            {"name": "Hana",   "id": "oWAxZDx7w5VEj9dCyTzz", "desc": "Clear Anime Voice"},
+            {"name": "Sakura", "id": "XrExE9yKIg1WjnnlVkGX", "desc": "Expressive Anime"},
         ],
     },
     "girl": {
-        "label": "👧 Girl",
+        "label": "◈ Girl",
         "voices": [
-            {"name": "Elli",    "id": "MF3mGyEYCl7XYWbV9V6O", "desc": "Young & Bright"},
-            {"name": "Lily",    "id": "pFZP5JQG7iQjIQuC4Bku", "desc": "Sweet & Light"},
-            {"name": "Amy",     "id": "nu9bn7ambTzvv3MFShMm", "desc": "Cheerful Girl"},
-            {"name": "Freya",   "id": "jsCqWAovK2LkecY7zXl4", "desc": "Playful Teen"},
+            {"name": "Elli",   "id": "MF3mGyEYCl7XYWbV9V6O", "desc": "Young & Bright"},
+            {"name": "Lily",   "id": "pFZP5JQG7iQjIQuC4Bku", "desc": "Sweet & Light"},
+            # Amy replaced — nu9bn7ambTzvv3MFShMm is a private cloned voice and returns 404
+            {"name": "Rachel", "id": "21m00Tcm4TlvDq8ikWAM", "desc": "Cheerful & Clear"},
+            {"name": "Freya",  "id": "jsCqWAovK2LkecY7zXl4", "desc": "Playful Teen"},
         ],
     },
     "women": {
-        "label": "👩 Women",
+        "label": "◈ Women",
         "voices": [
-            {"name": "Rachel",  "id": "21m00Tcm4TlvDq8ikWAM", "desc": "American Female"},
             {"name": "Bella",   "id": "EXAVITQu4vr4xnSDxMaL", "desc": "Soft & Warm"},
             {"name": "Dorothy", "id": "ThT5KcBeYPX3keUQqHPh", "desc": "British Female"},
             {"name": "Domi",    "id": "AZnzlk1XvdvUeBnXmlld", "desc": "Strong & Clear"},
@@ -45,7 +46,7 @@ VOICE_LIBRARY: dict[str, list[dict]] = {
         ],
     },
     "men": {
-        "label": "👨 Men",
+        "label": "◈ Men",
         "voices": [
             {"name": "Josh",    "id": "TxGEqnHWrfWFTfGW9XjX", "desc": "Young Male"},
             {"name": "Arnold",  "id": "VR6AewLTigWG4xSOukaG", "desc": "Confident Male"},
@@ -56,20 +57,19 @@ VOICE_LIBRARY: dict[str, list[dict]] = {
         ],
     },
     "old": {
-        "label": "👴 Old",
+        "label": "◈ Elder",
         "voices": [
-            {"name": "Clyde",   "id": "2EiwWnXFnvU5JabPnv8n", "desc": "Warm Elder"},
-            {"name": "Dave",    "id": "CYw3kZ02Hs0563khs1Fj", "desc": "British Elder"},
-            {"name": "Joseph",  "id": "Zlb1dXrM653N07WRdFW3", "desc": "Senior Narrator"},
-            {"name": "Fin",     "id": "D38z5RcWu1voky8WS1ja", "desc": "Wise Elder"},
+            {"name": "Clyde",  "id": "2EiwWnXFnvU5JabPnv8n", "desc": "Warm Elder"},
+            {"name": "Dave",   "id": "CYw3kZ02Hs0563khs1Fj", "desc": "British Elder"},
+            {"name": "Fin",    "id": "D38z5RcWu1voky8WS1ja", "desc": "Wise Elder"},
         ],
     },
     "child": {
-        "label": "🧒 Child",
+        "label": "◈ Child",
         "voices": [
             {"name": "Charlie", "id": "IKne3meq5aSn9XLyUdCD", "desc": "Natural Child"},
             {"name": "Matilda", "id": "XrExE9yKIg1WjnnlVkGX", "desc": "Young & Cheerful"},
-            {"name": "Elli Jr", "id": "MF3mGyEYCl7XYWbV9V6O", "desc": "Playful Child"},
+            {"name": "Mia",     "id": "MF3mGyEYCl7XYWbV9V6O", "desc": "Playful Child"},
         ],
     },
 }
