@@ -1,7 +1,6 @@
 """
 All InlineKeyboardMarkup builders for the bot.
 Callback-data format: prefix:arg1[:arg2] — always ≤ 64 bytes.
-Uses Unicode symbols for a premium, professional aesthetic (no emoji).
 """
 from __future__ import annotations
 
@@ -24,14 +23,45 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
 
 
+def _url_btn(text: str, url: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, url=url)
+
+
+# ─── Join Channels ────────────────────────────────────────────────────────────
+
+def join_channels_kb(channels: list[dict], extra_buttons: list[dict]) -> InlineKeyboardMarkup:
+    """
+    Creates a keyboard with:
+    - One button per required channel (URL button)
+    - Extra owner-defined URL buttons grouped by row_num
+    - A Confirm button at the bottom
+    """
+    builder = InlineKeyboardBuilder()
+    # Required channel join buttons (one per row)
+    for ch in channels:
+        label = ch.get("title") or ch.get("channel_id", "Channel")
+        builder.row(_url_btn(f"➕ Join {label}", ch["channel_url"]))
+    # Extra owner-defined buttons grouped by row_num
+    if extra_buttons:
+        rows: dict[int, list[InlineKeyboardButton]] = {}
+        for btn in extra_buttons:
+            r = btn.get("row_num", 0)
+            rows.setdefault(r, []).append(_url_btn(btn["btn_text"], btn["btn_url"]))
+        for row_num in sorted(rows):
+            builder.row(*rows[row_num])
+    # Confirm button
+    builder.row(_btn("✅ I've Joined — Confirm", "join:confirm"))
+    return builder.as_markup()
+
+
 # ─── Owner Panel ──────────────────────────────────────────────────────────────
 
 def owner_main() -> InlineKeyboardMarkup:
     return _kb(
-        [_btn("◆ Statistics",    "op:stats"),      _btn("◆ API Keys",     "op:apikeys")],
-        [_btn("◆ Users",         "op:users:0"),     _btn("◆ System Logs",  "op:logs")],
-        [_btn("◆ Broadcast",     "op:broadcast"),   _btn("◆ Voice Library","op:voices")],
-        [_btn("◆ Bot Settings",  "op:settings")],
+        [_btn("◆ Statistics",      "op:stats"),      _btn("◆ API Keys",      "op:apikeys")],
+        [_btn("◆ Users",           "op:users:0"),     _btn("◆ System Logs",   "op:logs")],
+        [_btn("◆ Broadcast",       "op:broadcast"),   _btn("◆ Voice Library", "op:voices")],
+        [_btn("◆ Bot Settings",    "op:settings"),    _btn("◆ Channels",      "op:channels")],
     )
 
 
@@ -170,6 +200,40 @@ def settings_kb(bot_online: bool) -> InlineKeyboardMarkup:
         [_btn(status_text, "st:toggle_maintenance")],
         [_btn("◀ Back", "op:main")],
     )
+
+
+# ─── Channel Management ───────────────────────────────────────────────────────
+
+def channels_menu_kb(channels: list[dict]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for ch in channels:
+        title = ch.get("title") or ch.get("channel_id", "Channel")
+        builder.row(
+            _btn(f"▸ {title}", f"ch:info:{ch['id']}"),
+            _btn("⊗ Remove", f"ch:del:{ch['id']}"),
+        )
+    builder.row(_btn("⊕ Add Channel", "ch:add"), _btn("✎ Edit Message", "ch:editmsg"))
+    builder.row(_btn("✎ Edit Buttons", "ch:editbtns"), _btn("⟳ Refresh", "op:channels"))
+    builder.row(_btn("◀ Back", "op:main"))
+    return builder.as_markup()
+
+
+def channel_del_confirm_kb(ch_id: int) -> InlineKeyboardMarkup:
+    return _kb(
+        [_btn("✓ Confirm Remove", f"ch:delok:{ch_id}"), _btn("✗ Cancel", "op:channels")],
+    )
+
+
+def edit_btns_kb(buttons: list[dict]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for btn in buttons:
+        builder.row(
+            _btn(f"Row {btn['row_num']} — {btn['btn_text']}", "noop"),
+            _btn("⊗ Remove", f"ch:delbtn:{btn['id']}"),
+        )
+    builder.row(_btn("⊕ Add Button", "ch:addbtn"), _btn("🗑 Clear All", "ch:clearbtn"))
+    builder.row(_btn("◀ Back", "op:channels"))
+    return builder.as_markup()
 
 
 # ─── Misc ─────────────────────────────────────────────────────────────────────

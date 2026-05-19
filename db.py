@@ -71,6 +71,27 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS required_channels (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id  TEXT    NOT NULL UNIQUE,
+    channel_url TEXT    NOT NULL,
+    title       TEXT    NOT NULL DEFAULT '',
+    added_at    TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS join_message (
+    id          INTEGER PRIMARY KEY DEFAULT 1,
+    msg_text    TEXT    NOT NULL DEFAULT '🔔 To use this bot, please join our channel(s) below.',
+    updated_at  TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS join_buttons (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    row_num  INTEGER NOT NULL DEFAULT 0,
+    btn_text TEXT    NOT NULL,
+    btn_url  TEXT    NOT NULL
+);
 """
 
 
@@ -297,6 +318,92 @@ async def set_setting(key: str, value: str) -> None:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+        await db.commit()
+
+
+# ─── Required Channels ────────────────────────────────────────────────────────
+
+async def get_required_channels() -> list[dict]:
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM required_channels ORDER BY id"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def add_required_channel(channel_id: str, channel_url: str, title: str = "") -> bool:
+    """Returns True if inserted, False if already exists."""
+    try:
+        async with aiosqlite.connect(DATABASE_FILE) as db:
+            await db.execute(
+                "INSERT INTO required_channels (channel_id, channel_url, title, added_at) "
+                "VALUES (?, ?, ?, ?)",
+                (channel_id, channel_url, title, _now()),
+            )
+            await db.commit()
+        return True
+    except aiosqlite.IntegrityError:
+        return False
+
+
+async def remove_required_channel(channel_db_id: int) -> bool:
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        cur = await db.execute(
+            "DELETE FROM required_channels WHERE id = ?", (channel_db_id,)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+# ─── Join Message & Buttons ───────────────────────────────────────────────────
+
+async def get_join_message_text() -> str:
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        async with db.execute("SELECT msg_text FROM join_message WHERE id = 1") as cur:
+            row = await cur.fetchone()
+            return row[0] if row else "🔔 To use this bot, please join our channel(s) below."
+
+
+async def set_join_message_text(text: str) -> None:
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        await db.execute(
+            "INSERT INTO join_message (id, msg_text, updated_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET msg_text = excluded.msg_text, updated_at = excluded.updated_at",
+            (text, _now()),
+        )
+        await db.commit()
+
+
+async def get_join_buttons() -> list[dict]:
+    """Returns list of extra URL buttons for the join message, ordered by row_num."""
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM join_buttons ORDER BY row_num, id"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def add_join_button(row_num: int, btn_text: str, btn_url: str) -> None:
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        await db.execute(
+            "INSERT INTO join_buttons (row_num, btn_text, btn_url) VALUES (?, ?, ?)",
+            (row_num, btn_text, btn_url),
+        )
+        await db.commit()
+
+
+async def remove_join_button(btn_id: int) -> bool:
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        cur = await db.execute("DELETE FROM join_buttons WHERE id = ?", (btn_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def clear_join_buttons() -> None:
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        await db.execute("DELETE FROM join_buttons")
         await db.commit()
 
 
